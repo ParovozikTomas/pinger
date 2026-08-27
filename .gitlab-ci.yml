@@ -1,0 +1,26 @@
+# Pipeline for scheduled site ping + Telegram report.
+# Create a Pipeline Schedule in GitLab UI (CI/CD → Schedules).
+
+stages:
+  - ping
+
+variables:
+  # Override in CI/CD Variables or in the schedule if needed.
+  PING_TIMEOUT: "15"
+  # Set to "true" to send Telegram only when the site is down / non-2xx-3xx.
+  NOTIFY_ONLY_ON_FAIL: "false"
+
+ping_site:
+  stage: ping
+  image: python:3.12-alpine
+  rules:
+    # Run only from Pipeline Schedules (and when triggered manually with the same source).
+    - if: $CI_PIPELINE_SOURCE == "schedule"
+    # Allow manual runs from the pipeline UI for testing.
+    - if: $CI_PIPELINE_SOURCE == "web"
+      when: manual
+  script:
+    - python ping.py
+  # Do not fail the whole schedule visibility on a bad HTTP status —
+  # the script still exits non-zero on failure so the job is red in GitLab.
+  allow_failure: true
