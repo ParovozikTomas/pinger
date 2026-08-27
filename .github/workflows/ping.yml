@@ -6,10 +6,9 @@ on:
     - cron: "*/5 * * * *"
   workflow_dispatch:
   push:
-    branches: [master, main]
+    branches: [master]
     paths:
       - "ping.py"
-      - "data/**"
       - ".github/workflows/ping.yml"
 
 permissions:
@@ -25,6 +24,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Setup Python
         uses: actions/setup-python@v5
@@ -47,7 +48,9 @@ jobs:
           git add data/urls.json data/telegram_offset.txt
           if git diff --staged --quiet; then
             echo "No data changes to commit"
-          else
-            git commit -m "Update ping data from Telegram"
-            git push
+            exit 0
           fi
+          git commit -m "Update ping data from Telegram"
+          # Avoid race if another run pushed meanwhile
+          git pull --rebase origin "${GITHUB_REF_NAME}"
+          git push origin "HEAD:${GITHUB_REF_NAME}"
