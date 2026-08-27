@@ -1,0 +1,47 @@
+name: Site ping
+
+on:
+  schedule:
+    # Every 10 minutes (UTC). Change as needed.
+    - cron: "*/10 * * * *"
+  workflow_dispatch: # manual run from Actions tab
+
+permissions:
+  contents: write
+
+concurrency:
+  group: site-ping
+  cancel-in-progress: false
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Ping sites and process Telegram commands
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          PING_TIMEOUT: "15"
+          NOTIFY_ONLY_ON_FAIL: "false"
+          DATA_DIR: data
+        run: python ping.py
+
+      - name: Commit URL list / offset if changed
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add data/urls.json data/telegram_offset.txt
+          if git diff --staged --quiet; then
+            echo "No data changes to commit"
+          else
+            git commit -m "Update ping data from Telegram"
+            git push
+          fi

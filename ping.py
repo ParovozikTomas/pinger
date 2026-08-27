@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Scheduled site pinger with Telegram URL management (GitLab CI).
+"""Scheduled site pinger with Telegram URL management (GitHub Actions).
 
-Commands are processed when the pipeline runs (schedule). The URL list is
-stored in GitLab CI/CD variable PING_URLS (JSON array).
+Commands are processed when the workflow runs. URL list is stored in
+data/urls.json and committed back by the workflow.
 """
 
 from __future__ import annotations
@@ -14,6 +14,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from pathlib import Path
 from typing import Any
 
 
@@ -24,8 +25,8 @@ HELP_TEXT = """\
 /del <номер|url> — удалить URL
 /help — эта справка
 
-Отчёт по всем URL приходит по расписанию GitLab.
-Команды обрабатываются при следующем запуске pipeline.
+Отчёт по всем URL приходит по расписанию GitHub Actions.
+Команды обрабатываются при следующем запуске workflow.
 """
 
 
@@ -52,7 +53,7 @@ def http_json(
     data: dict[str, Any] | bytes | None = None,
     timeout: float = 30,
 ) -> Any:
-    hdrs = {"User-Agent": "gitlab-site-pinger/2.0", **(headers or {})}
+    hdrs = {"User-Agent": "github-site-pinger/2.0", **(headers or {})}
     body: bytes | None = None
     if isinstance(data, dict):
         body = json.dumps(data).encode("utf-8")
@@ -99,62 +100,47 @@ def send_telegram(token: str, chat_id: str, text: str) -> None:
         raise RuntimeError(f"Telegram sendMessage failed: {result}")
 
 
-class GitlabVars:
-    def __init__(self, api_url: str, project_id: str, token: str) -> None:
-        self.base = (
-            f"{api_url.rstrip('/')}/projects/"
-            f"{urllib.parse.quote(str(project_id), safe='')}/variables"
-        )
-        self.headers = {"PRIVATE-TOKEN": token}
-
-    def get(self, key: str, default: str | None = None) -> str | None:
-        try:
-            data = http_json("GET", f"{self.base}/{key}", headers=self.headers)
-            return data.get("value", default)
-        except RuntimeError as exc:
-            if "HTTP 404" in str(exc):
-                return default
-            raise
-
-    def set(self, key: str, value: str) -> None:
-        payload = {"value": value}
-        encoded_key = urllib.parse.quote(key, safe="")
-        try:
-            http_json(
-                "PUT",
-                f"{self.base}/{encoded_key}",
-                headers=self.headers,
-                data=payload,
-            )
-        except RuntimeError as exc:
-            if "HTTP 404" not in str(exc):
-                raise
-            http_json(
-                "POST",
-                self.base,
-                headers=self.headers,
-                data={"key": key, "value": value},
-            )
+def data_dir() -> Path:
+    path = Path(env("DATA_DIR", "data") or "data")
+    path.mkdir(parents=True, exist_ok=True)
+    return path
 
 
-def parse_urls(raw: str | None) -> list[str]:
-    if not raw or not raw.strip():
-        return []
-    raw = raw.strip()
+def load_urls() -> list[str]:
+    path = data_dir() / "urls.json"
+    if not path.exists():
+        legacy = env("PING_URL")
+        return [legacy] if legacy else []
     try:
-        data = json.loads(raw)
-        if isinstance(data, list):
-            return [str(u).strip() for u in data if str(u).strip()]
-        if isinstance(data, str) and data.strip():
-            return [data.strip()]
+        data = json.loads(path.read_text(encoding="utf-8"))
     except json.JSONDecodeError:
-        pass
-    parts = []
-    for chunk in raw.replace(",", "\n").splitlines():
-        chunk = chunk.strip()
-        if chunk:
-            parts.append(chunk)
-    return parts
+        return []
+    if isinstance(data, list):
+        return [str(u).strip() for u in data if str(u).strip()]
+    return []
+
+
+def save_urls(urls: list[str]) -> None:
+    path = data_dir() / "urls.json"
+    path.write_text(
+        json.dumps(urls, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+
+
+def load_offset() -> int:
+    path = data_dir() / "telegram_offset.txt"
+    if not path.exists():
+        return 0
+    try:
+        return int(path.read_text(encoding="utf-8").strip() or "0")
+    except ValueError:
+        return 0
+
+
+def save_offset(offset: int) -> None:
+    path = data_dir() / "telegram_offset.txt"
+    path.write_text(str(offset) + "\n", encoding="utf-8")
 
 
 def normalize_url(url: str) -> str:
@@ -261,7 +247,7 @@ def ping(url: str, timeout: float) -> tuple[int | None, float, str | None]:
         request = urllib.request.Request(
             url,
             method="GET",
-            headers={"User-Agent": "gitlab-site-pinger/2.0"},
+            headers={"User-Agent": "github-site-pinger/2.0"},
         )
         with urllib.request.urlopen(request, timeout=timeout) as response:
             elapsed_ms = (time.perf_counter() - started) * 1000
@@ -308,61 +294,19 @@ def main() -> int:
         "yes",
     }
 
-    api_url = env("CI_API_V4_URL", "https://gitlab.com/api/v4") or "https://gitlab.com/api/v4"
-    project_id = env("CI_PROJECT_ID")
-    gitlab_token = env("GITLAB_API_TOKEN")
-
-    store: GitlabVars | None = None
-    if project_id and gitlab_token:
-        store = GitlabVars(api_url, project_id, gitlab_token)
-    else:
-        print(
-            "WARNING: GITLAB_API_TOKEN or CI_PROJECT_ID missing — "
-            "URL changes from Telegram will not persist between runs",
-            file=sys.stderr,
-        )
-
-    raw_urls = store.get("PING_URLS") if store else None
-    raw_offset = store.get("TELEGRAM_OFFSET", "0") if store else None
-    if raw_urls is None:
-        raw_urls = env("PING_URLS")
-    if not raw_urls:
-        legacy = env("PING_URL")
-        raw_urls = json.dumps([legacy]) if legacy else "[]"
-    if raw_offset is None:
-        raw_offset = env("TELEGRAM_OFFSET", "0") or "0"
-
-    urls = parse_urls(raw_urls)
-    try:
-        offset = int(raw_offset)
-    except ValueError:
-        offset = 0
+    urls = load_urls()
+    offset = load_offset()
 
     try:
-        urls, offset, urls_changed = process_telegram_commands(
+        urls, offset, _urls_changed = process_telegram_commands(
             token, chat_id, urls, offset
         )
     except Exception as exc:  # noqa: BLE001
         print(f"ERROR processing Telegram commands: {exc}", file=sys.stderr)
-        urls_changed = False
 
-    if store:
-        try:
-            store.set("TELEGRAM_OFFSET", str(offset))
-            if urls_changed:
-                store.set("PING_URLS", json.dumps(urls, ensure_ascii=False))
-                print(f"Saved PING_URLS ({len(urls)} items)")
-        except Exception as exc:  # noqa: BLE001
-            print(f"ERROR saving GitLab variables: {exc}", file=sys.stderr)
-            try:
-                send_telegram(
-                    token,
-                    chat_id,
-                    f"Не удалось сохранить список URL в GitLab:\n{exc}",
-                )
-            except Exception:  # noqa: BLE001
-                pass
-            return 1
+    save_urls(urls)
+    save_offset(offset)
+    print(f"Saved {len(urls)} URL(s), telegram offset={offset}")
 
     results: list[tuple[str, int | None, float, str | None]] = []
     for url in urls:
