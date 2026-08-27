@@ -1,140 +1,130 @@
 # GitLab Site Pinger → Telegram
 
-Скрипт по расписанию GitLab CI пингует сайт и отправляет отчёт (HTTP-код и время ответа) в Telegram-бота.
+Скрипт по расписанию GitLab CI:
 
-## Что понадобится
+1. забирает команды из Telegram (`/add`, `/del`, `/list`);
+2. сохраняет список URL в CI/CD Variable;
+3. пингует все URL и шлёт отчёт в бота.
 
-- Репозиторий на GitLab (gitlab.com или свой инстанс)
-- URL сайта для проверки
-- Telegram-бот и chat ID, куда слать сообщения
+> **Важно:** GitLab CI не держит бота онлайн 24/7. Команды обрабатываются **при следующем запуске schedule**. Для удобства ставьте cron чаще, например каждые 10 минут (`*/10 * * * *`). Ответ бота придёт после этого запуска.
+
+Мгновенные ответы без задержки нужны только если бот крутится на отдельном сервере (VPS / Railway и т.п.) — этот проект так не устроен.
+
+---
+
+## Команды бота
+
+| Команда | Действие |
+|---------|----------|
+| `/help` | справка |
+| `/list` | показать URL |
+| `/add https://example.com` | добавить |
+| `/del 1` | удалить по номеру |
+| `/del https://example.com` | удалить по URL |
+
+Управлять может только чат из `TELEGRAM_CHAT_ID`.
 
 ---
 
 ## Пошаговая настройка
 
-### 1. Создайте Telegram-бота
+### 1. Telegram-бот
 
-1. Откройте [@BotFather](https://t.me/BotFather) в Telegram.
-2. Отправьте `/newbot` и следуйте инструкциям (имя и username бота).
-3. Скопируйте **токен** вида `123456:ABC-DEF...` — это `TELEGRAM_BOT_TOKEN`.
+1. [@BotFather](https://t.me/BotFather) → `/newbot` → скопируйте токен (`TELEGRAM_BOT_TOKEN`).
+2. Напишите боту `/start`.
+3. Откройте `https://api.telegram.org/bot<TOKEN>/getUpdates` и найдите `"chat":{"id": ...}` → это `TELEGRAM_CHAT_ID`.
 
-### 2. Узнайте Chat ID
+### 2. Код в GitLab
 
-**Личный чат с ботом**
+Репозиторий: файлы `ping.py`, `.gitlab-ci.yml`, `README.md`.  
+Ветка с schedule: `master` или `main`.
 
-1. Напишите боту любое сообщение (например `/start`).
-2. Откройте в браузере (подставьте свой токен):
+### 3. CI/CD Variables
 
-   ```text
-   https://api.telegram.org/bot<TOKEN>/getUpdates
-   ```
+**Settings → CI/CD → Variables → Add variable**
 
-3. В ответе найдите `"chat":{"id": 123456789}` — это `TELEGRAM_CHAT_ID`.
+| Variable | Значение | Masked | Описание |
+|----------|----------|--------|----------|
+| `TELEGRAM_BOT_TOKEN` | токен BotFather | да | бот |
+| `TELEGRAM_CHAT_ID` | ваш chat id | нет | кто управляет и куда отчёты |
+| `GITLAB_API_TOKEN` | токен с правом писать CI variables | да | сохранение списка URL |
+| `PING_URLS` | `[]` | нет | список URL (JSON), создайте вручную |
+| `TELEGRAM_OFFSET` | `0` | нет | курсор Telegram updates |
 
-**Группа / канал**
+`PING_URL` больше не обязателен — URL добавляются через бота.
 
-1. Добавьте бота в группу (для канала — сделайте бота администратором с правом писать сообщения).
-2. Напишите в группе любое сообщение (или перешлите пост в канал).
-3. Снова откройте `getUpdates` — у группы/канала `id` обычно отрицательный, например `-1001234567890`.
+#### Как создать `GITLAB_API_TOKEN`
 
-### 3. Залейте проект в GitLab
+Нужен токен, который может читать/менять **CI/CD Variables** проекта.
 
-1. Создайте новый проект в GitLab.
-2. В корне репозитория должны быть файлы:
+**Вариант A — Project Access Token** (удобнее):
 
-   - `ping.py` — скрипт пинга и отправки в Telegram  
-   - `.gitlab-ci.yml` — job для CI  
-   - `README.md` — эта инструкция  
+1. Проект → **Settings → Access Tokens**
+2. Name: `pinger-vars`
+3. Role: **Maintainer** (или Developer, если хватает прав на variables)
+4. Scopes: `api`
+5. Create → скопируйте токен в `GITLAB_API_TOKEN`
 
-3. Запушьте код:
+**Вариант B — Personal Access Token** своего пользователя с scope `api` (или fine-grained правом на CI/CD variables проекта).
 
-   ```bash
-   git init
-   git add ping.py .gitlab-ci.yml README.md .gitignore
-   git commit -m "Add scheduled site ping with Telegram reports"
-   git remote add origin <URL_ВАШЕГО_РЕПО>
-   git push -u origin main
-   ```
+Если токена нет, `/add` и `/del` в логе сработают, но **список не сохранится** до следующего run.
 
-### 4. Добавьте CI/CD Variables
+### 4. Pipeline Schedule
 
-В GitLab: **Settings → CI/CD → Variables → Add variable**.
+1. **Build → Pipeline schedules → New schedule**
+2. Cron, например `*/10 * * * *` (каждые 10 минут)
+3. Timezone — ваш
+4. Target branch — `master` / `main`
+5. Activated — on
 
-| Variable              | Значение                         | Protected | Masked | Описание                          |
-|-----------------------|----------------------------------|-----------|--------|-----------------------------------|
-| `PING_URL`            | `https://example.com`            | по желанию| нет    | URL сайта для проверки            |
-| `TELEGRAM_BOT_TOKEN`  | токен от BotFather               | да*       | **да** | Токен бота                        |
-| `TELEGRAM_CHAT_ID`    | `123456789` или `-100...`        | да*       | нет**  | Куда слать сообщения              |
+Чем чаще schedule, тем быстрее бот «отвечает» на `/add` и `/del`.
 
-\* Если переменная **Protected**, schedule должен запускаться с **protected** ветки (обычно `main`/`master`).  
-\*\* Masked работает только для значений, похожих на секреты (длинные строки без пробелов); chat ID часто нельзя замаскировать — это нормально.
+### 5. Проверка
 
-Опционально:
+1. Напишите боту: `/add https://example.com`
+2. В schedules нажмите **Play** (или дождитесь cron)
+3. Бот должен ответить, что URL добавлен, и прислать отчёт пинга
+4. `/list`, затем `/del 1` — снова Play / cron
 
-| Variable              | Значение по умолчанию | Описание |
-|-----------------------|-----------------------|----------|
-| `PING_TIMEOUT`        | `15`                  | Таймаут HTTP-запроса (сек) |
-| `NOTIFY_ONLY_ON_FAIL` | `false`               | `true` — писать в Telegram только при ошибке |
-
-### 5. Создайте Pipeline Schedule
-
-1. Откройте **Build → Pipeline schedules** (или **CI/CD → Schedules**).
-2. Нажмите **New schedule**.
-3. Заполните:
-
-   - **Description**: например `Hourly site ping`
-   - **Interval Pattern**: cron, например:
-     - `0 * * * *` — каждый час  
-     - `*/15 * * * *` — каждые 15 минут  
-     - `0 9 * * *` — каждый день в 09:00 (UTC!)  
-   - **Cron Timezone**: выберите нужный (или учтите, что по умолчанию часто UTC)
-   - **Target branch**: `main` (или ваша основная ветка)
-   - **Activated**: включено  
-
-4. Сохраните schedule.
-
-> Job `ping_site` в `.gitlab-ci.yml` запускается только для `schedule` (и вручную из Web UI). Обычный push в репозиторий пинг не триггерит.
-
-### 6. Проверьте работу
-
-1. В списке schedules нажмите **Play** (▶) у вашего расписания — сразу запустится pipeline.
-2. Откройте pipeline → job `ping_site` → смотрите лог.
-3. В Telegram должно прийти сообщение вида:
-
-   ```text
-   ✅ Site ping report
-   URL: https://example.com
-   Status: 200
-   Time: 312 ms
-   ```
-
-При недоступности сайта:
+Пример отчёта:
 
 ```text
-❌ Site ping report
-URL: https://example.com
-Status: N/A
-Time: 15002 ms
-Error: <timed out>
+📊 Site ping report
+✅ https://example.com
+   Status: 200 · 312 ms
+❌ https://down.example
+   Status: N/A · 15002 ms
+   Error: timed out
 ```
 
 ---
 
-## Локальный запуск (для отладки)
+## Опциональные переменные
 
-```bash
-export PING_URL="https://example.com"
-export TELEGRAM_BOT_TOKEN="123456:ABC..."
-export TELEGRAM_CHAT_ID="123456789"
+| Variable | По умолчанию | Описание |
+|----------|--------------|----------|
+| `PING_TIMEOUT` | `15` | таймаут HTTP (сек) |
+| `NOTIFY_ONLY_ON_FAIL` | `false` | `true` — отчёт только если есть ошибки |
+
+---
+
+## Локальный запуск
+
+Без `GITLAB_API_TOKEN` список из Telegram **не сохранится** между запусками. Для разового теста:
+
+```powershell
+$env:TELEGRAM_BOT_TOKEN="..."
+$env:TELEGRAM_CHAT_ID="123456789"
+$env:PING_URLS='["https://example.com"]'
 python ping.py
 ```
 
-На Windows (PowerShell):
+С сохранением в GitLab дополнительно:
 
 ```powershell
-$env:PING_URL="https://example.com"
-$env:TELEGRAM_BOT_TOKEN="123456:ABC..."
-$env:TELEGRAM_CHAT_ID="123456789"
+$env:CI_API_V4_URL="https://gitlab.com/api/v4"
+$env:CI_PROJECT_ID="12345678"   # Settings → General → Project ID
+$env:GITLAB_API_TOKEN="glpat-..."
 python ping.py
 ```
 
@@ -142,11 +132,10 @@ python ping.py
 
 ## Как это устроено
 
-1. GitLab по cron запускает pipeline.
-2. Job поднимает образ `python:3.12-alpine` и выполняет `python ping.py`.
-3. Скрипт делает GET на `PING_URL`, замеряет время и HTTP-код.
-4. Результат уходит в Telegram через Bot API (`sendMessage`).
-5. При ошибке сайта job в GitLab будет красным (`allow_failure: true`, чтобы schedule не «ломал» видимость других процессов).
+1. Schedule запускает `ping.py`.
+2. Скрипт читает `getUpdates` Telegram и выполняет команды от `TELEGRAM_CHAT_ID`.
+3. Список URL пишется в variable `PING_URLS` через GitLab API.
+4. Все URL пингуются, сводный отчёт уходит в тот же чат.
 
 ---
 
@@ -154,11 +143,10 @@ python ping.py
 
 | Проблема | Что проверить |
 |----------|----------------|
-| Сообщение не приходит | Написали ли боту `/start`; верный `TELEGRAM_CHAT_ID`; токен не с пробелами |
-| Job skipped | Schedule активирован; ветка совпадает; source = `schedule` |
-| `environment variable ... is not set` | Variables добавлены в проекте; для Protected — ветка protected |
-| Сайт «упал», а код 403/401 | Нормально: пингер смотрит на HTTP-статус, не на «логин»; при необходимости смените URL на публичный health-check |
-| Время срабатывания «не то» | Cron в GitLab часто в UTC — проверьте timezone у schedule |
+| Бот молчит на `/add` | Дождитесь schedule или нажмите Play; cron слишком редкий |
+| «Не удалось сохранить список» | `GITLAB_API_TOKEN` с `api`; роль Maintainer; variable не Protected на unprotected ветке |
+| Команды из другого чата игнор | Управление только у `TELEGRAM_CHAT_ID` |
+| Пустой отчёт | Список пуст — сначала `/add` |
 
 ---
 
@@ -166,7 +154,7 @@ python ping.py
 
 ```text
 .
-├── ping.py           # пинг + отправка в Telegram
+├── ping.py           # команды бота + пинг + отчёт
 ├── .gitlab-ci.yml    # job по расписанию
 ├── .gitignore
 └── README.md
