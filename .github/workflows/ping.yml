@@ -2,8 +2,8 @@ name: Site ping
 
 on:
   schedule:
-    # Every 10 minutes (UTC).
-    - cron: "*/10 * * * *"
+    # Every 5 minutes (UTC). GitHub minimum interval is 5 minutes.
+    - cron: "*/5 * * * *"
   workflow_dispatch:
   push:
     branches: [master, main]
